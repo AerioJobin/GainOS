@@ -1149,20 +1149,26 @@ function newProfileData(name, avatar) {
 function loadProfiles() {
   const raw = localStorage.getItem('gainOS_profiles');
   if (raw) {
-    profiles = JSON.parse(raw);
-    activeProfileId = localStorage.getItem('gainOS_activeProfile') || null;
+    try {
+      profiles = JSON.parse(raw);
+      activeProfileId = localStorage.getItem('gainOS_activeProfile') || null;
+      // Validate activeProfileId still exists
+      if (activeProfileId && !profiles.find(p => p.id === activeProfileId)) activeProfileId = null;
+    } catch(e) { profiles = []; activeProfileId = null; }
   } else {
-    const p = newProfileData('Profile 1', '💪');
+    // No data at all — check for legacy single-profile data to migrate
     const oldDates = localStorage.getItem('completedDates');
     if (oldDates) {
+      const p = newProfileData('Profile 1', '💪');
       p.completedDates = JSON.parse(oldDates);
       p.meals = JSON.parse(localStorage.getItem('meals') || '{}');
       p.weights = JSON.parse(localStorage.getItem('weights') || '[]');
       p.prs = JSON.parse(localStorage.getItem('prs') || '{}');
       p.workoutHistory = JSON.parse(localStorage.getItem('workoutHistory') || '{}');
       ['completedDates','meals','weights','prs','workoutHistory'].forEach(k => localStorage.removeItem(k));
+      profiles = [p]; activeProfileId = p.id; saveProfilesToDisk();
     }
-    profiles = [p]; activeProfileId = p.id; saveProfilesToDisk();
+    // else: truly fresh install — profiles stays [], show selector
   }
 }
 
@@ -1595,10 +1601,12 @@ function renderMeals() {
   const total = meals.reduce((s, m) => s + m.protein, 0);
 
   // Ring
-  const pct = Math.min(1, total / 145);
+  const target = state.proteinTarget || 145;
+  const pct = Math.min(1, total / target);
   const circumference = 2 * Math.PI * 68;
   document.getElementById('proteinRingFill').style.strokeDashoffset = circumference * (1 - pct);
   document.getElementById('ringValue').textContent = total + 'g';
+  document.getElementById('ringTargetVal').textContent = target;
 
   // Quick meals
   document.getElementById('quickMealGrid').innerHTML = QUICK_MEALS.map(m =>
@@ -2039,10 +2047,12 @@ function handlePsOverlayClick(e) {
 }
 function createAndOnboard() {
   const name = document.getElementById('psNameInput').value.trim() || 'Profile ' + (profiles.length + 1);
-  const avatar = document.getElementById('newProfileSheet')._selectedAvatar || '&#x1F4AA;';
+  const avatar = document.getElementById('newProfileSheet')._selectedAvatar || '💪';
   const p = addProfile(name, avatar);
   _obProfileId = p.id;
+  activeProfileId = p.id; // pre-activate so state writes go to this profile
   document.getElementById('newProfileSheet').classList.remove('open');
+  document.getElementById('profileOverlay').classList.add('hidden'); // hide selector before onboarding
   startOnboarding();
 }
 function deleteCurrentProfile() {
@@ -2103,11 +2113,37 @@ function selectEquip(eq, el) {
 }
 async function generateSplitFromAI() {
   const wt = parseFloat(document.getElementById('obWeight').value) || 70;
-  const apiKey = getAPIKey(); if (!apiKey) return;
   document.querySelectorAll('.ob-step').forEach(s => s.classList.remove('active'));
   document.getElementById('obStep3').classList.add('active');
   const fill = document.getElementById('obProgressFill');
   let prog = 0; const progInt = setInterval(() => { prog = Math.min(prog + 8, 90); fill.style.width = prog + '%'; }, 400);
+
+  const apiKey = sessionStorage.getItem('gainOS_apiKey') ||
+    (() => { const k = prompt('Enter Anthropic API key (optional — leave blank for a default plan):'); if (k) sessionStorage.setItem('gainOS_apiKey', k); return k; })();
+
+  if (!apiKey) {
+    // MANUAL FALLBACK: generate a sensible default split without AI
+    clearInterval(progInt); fill.style.width = '100%';
+    const goalSplits = {
+      strength: { 1:{name:'PUSH',title:'PUSH DAY',sub:'Monday — Chest & Tris',exercises:[{name:'Barbell Bench Press',target:'5×5',muscles:'Chest'},{name:'Overhead Press',target:'4×5',muscles:'Delts'},{name:'Weighted Dips',target:'3×6',muscles:'Chest/Tris'}]}, 2:{name:'PULL',title:'PULL DAY',sub:'Tuesday — Back & Bis',exercises:[{name:'Weighted Pull-Ups',target:'5×5',muscles:'Lats'},{name:'Barbell Row',target:'4×5',muscles:'Back'},{name:'Face Pulls',target:'3×12',muscles:'Rear Delts'}]}, 3:{name:'REST',title:'REST DAY',sub:'Wednesday — Recovery',exercises:[]}, 4:{name:'LEGS',title:'LEG DAY',sub:'Thursday — Squats & DL',exercises:[{name:'Back Squat',target:'5×5',muscles:'Quads'},{name:'Romanian Deadlift',target:'4×6',muscles:'Hamstrings'},{name:'Leg Press',target:'3×10',muscles:'Quads'}]}, 5:{name:'REST',title:'REST DAY',sub:'Friday — Recovery',exercises:[]}, 6:{name:'REST',title:'REST DAY',sub:'Saturday — Recovery',exercises:[]}, 0:{name:'REST',title:'REST DAY',sub:'Sunday — Recovery',exercises:[]} },
+      aesthetics: { 1:{name:'CHEST',title:'CHEST DAY',sub:'Monday — Chest Focus',exercises:[{name:'Incline Barbell Press',target:'4×8',muscles:'Upper Chest'},{name:'Flat DB Press',target:'3×10',muscles:'Chest'},{name:'Cable Fly',target:'3×12',muscles:'Chest'},{name:'Seated Lateral Raise',target:'4×15',muscles:'Side Delts'}]}, 2:{name:'PULL',title:'PULL DAY',sub:'Tuesday — Back & Bis',exercises:[{name:'Weighted Pull-Ups',target:'4×8',muscles:'Lats'},{name:'Cable Row',target:'3×10',muscles:'Back'},{name:'Incline DB Curl',target:'3×12',muscles:'Biceps'},{name:'Face Pulls',target:'4×15',muscles:'Rear Delts'}]}, 3:{name:'LEGS',title:'LEG DAY',sub:'Wednesday — Legs',exercises:[{name:'Back Squat',target:'4×8',muscles:'Quads'},{name:'Romanian Deadlift',target:'3×10',muscles:'Hamstrings'},{name:'Leg Extension',target:'3×15',muscles:'Quads'}]}, 4:{name:'REST',title:'REST DAY',sub:'Thursday — Recovery',exercises:[]}, 5:{name:'PUSH',title:'PUSH DAY',sub:'Friday — Shoulder & Arms',exercises:[{name:'Seated DB Press',target:'4×10',muscles:'Delts'},{name:'Lateral Raise',target:'4×15',muscles:'Side Delts'},{name:'Skull Crushers',target:'3×12',muscles:'Triceps'}]}, 6:{name:'REST',title:'REST DAY',sub:'Saturday — Recovery',exercises:[]}, 0:{name:'REST',title:'REST DAY',sub:'Sunday — Recovery',exercises:[]} },
+      fat_loss: { 1:{name:'FULL A',title:'FULL BODY A',sub:'Monday — Compound Focus',exercises:[{name:'Back Squat',target:'3×10',muscles:'Legs'},{name:'Bench Press',target:'3×10',muscles:'Chest'},{name:'Bent Row',target:'3×10',muscles:'Back'}]}, 2:{name:'REST',title:'REST DAY',sub:'Tuesday — Recovery',exercises:[]}, 3:{name:'FULL B',title:'FULL BODY B',sub:'Wednesday — Compound Focus',exercises:[{name:'Romanian Deadlift',target:'3×10',muscles:'Hamstrings'},{name:'Pull-Ups',target:'3×10',muscles:'Lats'},{name:'Overhead Press',target:'3×10',muscles:'Delts'}]}, 4:{name:'REST',title:'REST DAY',sub:'Thursday — Recovery',exercises:[]}, 5:{name:'FULL C',title:'FULL BODY C',sub:'Friday — Compound Focus',exercises:[{name:'Leg Press',target:'3×12',muscles:'Quads'},{name:'DB Incline Press',target:'3×12',muscles:'Chest'},{name:'Cable Row',target:'3×12',muscles:'Back'}]}, 6:{name:'REST',title:'REST DAY',sub:'Saturday — Recovery',exercises:[]}, 0:{name:'REST',title:'REST DAY',sub:'Sunday — Recovery',exercises:[]} },
+      athletic: { 1:{name:'POWER',title:'POWER DAY',sub:'Monday — Power & Speed',exercises:[{name:'Power Clean',target:'5×3',muscles:'Full Body'},{name:'Box Jump',target:'4×5',muscles:'Legs'},{name:'Med Ball Slam',target:'3×8',muscles:'Core'}]}, 2:{name:'LOWER',title:'LOWER BODY',sub:'Tuesday — Legs',exercises:[{name:'Back Squat',target:'4×6',muscles:'Quads'},{name:'Nordic Curl',target:'3×6',muscles:'Hamstrings'},{name:'Single-Leg RDL',target:'3×8',muscles:'Glutes'}]}, 3:{name:'REST',title:'REST DAY',sub:'Wednesday — Recovery',exercises:[]}, 4:{name:'UPPER',title:'UPPER BODY',sub:'Thursday — Upper',exercises:[{name:'Weighted Pull-Ups',target:'4×6',muscles:'Lats'},{name:'Overhead Press',target:'4×6',muscles:'Delts'},{name:'Landmine Row',target:'3×8',muscles:'Back'}]}, 5:{name:'COND',title:'CONDITIONING',sub:'Friday — Cardio & Core',exercises:[{name:'Assault Bike Intervals',target:'10×30s',muscles:'Cardio'},{name:'Plank Variations',target:'3×60s',muscles:'Core'}]}, 6:{name:'REST',title:'REST DAY',sub:'Saturday — Recovery',exercises:[]}, 0:{name:'REST',title:'REST DAY',sub:'Sunday — Recovery',exercises:[]} }
+    };
+    _obSplit = goalSplits[_obGoal] || goalSplits.aesthetics;
+    _obProtein = Math.round(wt * 2.2);
+    document.querySelectorAll('.ob-step').forEach(s => s.classList.remove('active'));
+    document.getElementById('obStep4').classList.add('active');
+    const dayNames = ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'];
+    document.getElementById('obSplitPreview').innerHTML =
+      `<div class="ob-protein-note">&#x26A1; Daily protein target: ${_obProtein}g (${wt}kg × 2.2)</div>` +
+      Object.entries(_obSplit).map(([d, s]) =>
+        `<div class="ob-split-day"><div><div class="ob-split-label">${dayNames[d]}</div><div class="ob-split-title ${s.exercises.length===0?'ob-split-rest':''}}">${s.title}</div></div><div style="font-size:11px;color:var(--text3)">${s.exercises.length} exercises</div></div>`
+      ).join('') + `<div style="font-size:12px;color:var(--text2);margin-top:10px;font-style:italic;">Built for <strong>${_obGoal}</strong> — ${_obDays} training days/week</div>`;
+    return;
+  }
+
+  // --- Original AI path (fill/prog/progInt already declared above) ---
   const prompt = `Generate a weekly gym split for: goal=${_obGoal}, weight=${wt}kg, days/week=${_obDays}, equipment=${_obEquip}. Return ONLY valid JSON: {"split":{"0":{"name":"REST","title":"REST DAY","sub":"Sunday — Recovery","exercises":[]},"1":{"name":"PUSH","title":"PUSH DAY","sub":"Monday — Chest & Triceps","exercises":[{"name":"Bench Press","target":"4x8","muscles":"Chest"}]},"2":{...},"3":{...},"4":{...},"5":{...},"6":{...}},"protein_target":150,"coach_note":"..."} Rules: ${_obDays} training days, rest on remaining days, 5-7 exercises per training day, equipment=${_obEquip} appropriate.`;
   try {
     const res = await fetch('https://api.anthropic.com/v1/messages', {
@@ -2157,18 +2193,16 @@ function confirmOnboarding() {
 document.addEventListener('DOMContentLoaded', () => {
   loadProfiles();
   if (activeProfileId && profiles.find(p => p.id === activeProfileId)) {
+    // Known active profile — load it and go straight to app
     loadStateFromProfile();
     document.getElementById('profileOverlay').classList.add('hidden');
-  } else if (profiles.length === 1 && !activeProfileId) {
-    activateProfile(profiles[0].id);
-    document.getElementById('profileOverlay').classList.add('hidden');
+    initHome(); initWorkout(); renderMeals();
   } else {
+    // No active profile (fresh install or logged out) — always show selector
     renderProfileGrid();
-    // Show profile selector
+    // profileOverlay is visible by default (no .hidden class)
+    initHome(); initWorkout(); renderMeals(); // pre-load behind the overlay
   }
-  initHome();
-  initWorkout();
-  renderMeals();
 });
 </script>
 </body>
